@@ -2,7 +2,7 @@
 
 A native port of **Super Monkey Ball Jr.** (GBA, 2002, Realism/THQ) built for **Wear OS smartwatches** with round displays (Samsung Galaxy Watch 4/5/6/7/Ultra, Google Pixel Watch 1/2/3, Xiaomi Watch 2, etc.), plus Android phones, Windows/Linux/macOS and the web (WebAssembly). A custom **SDL3** shell adds wrist-gyro tilt, a round lens and a HUD redrawn for the round screen. The ROM is **not** distributed: each player loads their own copy.
 
-> **Current phase: 1, the native shell on the libmgba core.** Phase 2, a real static recompilation of the game code to native C for every platform, is in progress. See [Project Phases](#-project-phases).
+> **Current phase: 2, static recompilation.** The game's code is translated to C ahead of time and runs as native code; mGBA only provides the GBA hardware. See [Project Phases](#-project-phases).
 
 <p align="center">
   <img src="watch_smbjr_gyro_demo.png" alt="Super Monkey Ball Jr. on Wear OS - wrist gyro tilt and round lens" width="800">
@@ -12,7 +12,7 @@ A native port of **Super Monkey Ball Jr.** (GBA, 2002, Realism/THQ) built for **
 
 ## 🧭 Project Phases
 
-### ✅ Phase 1: Native shell on the libmgba core (this release)
+### ✅ Phase 1: Native shell on the libmgba core
 The game's ARM7TDMI code runs on the **libmgba** core (MPL-2.0), which interprets the CPU and emulates the GBA hardware. Everything around the core is new code written for this port:
 - an SDL3 shell that runs on Wear OS, Android, desktop and the web from a single C code base;
 - a HUD read from the GBA sprite memory (OAM/VRAM) every frame and redrawn natively for round and wide screens;
@@ -22,16 +22,33 @@ The game's ARM7TDMI code runs on the **libmgba** core (MPL-2.0), which interpret
 
 All four platforms are playable today.
 
-### 🔧 Phase 2: Real static recompilation (in progress)
-The goal is to stop interpreting the game. Every instruction of Super Monkey Ball Jr. is translated **ahead of time** into C and compiled by each platform's own compiler, so the game runs as native code on x86-64, ARM64, ARMv7 and WebAssembly:
-- **`tools/recomp`** reads your ROM, finds every function (Thumb and ARM, including the routines the game copies to IWRAM at boot and the jump tables behind indirect calls) and writes one C function per guest function.
-- The generated C is built by MSVC/MinGW/GCC/Clang on desktop, the NDK on Wear OS and Android, and Emscripten for the web. There is no interpreter or JIT in the game loop.
+### ✅ Phase 2: Real static recompilation
+The game is no longer interpreted. Every instruction of Super Monkey Ball Jr. is translated **ahead of time** into C and compiled by each platform's own compiler (MinGW/GCC/Clang on desktop, the NDK on Wear OS and Android, Emscripten for the web), so the game runs as native x86-64, ARM64, ARMv7 or WebAssembly code.
+
+**How it works**
+- **`tools/recomp/recomp.py`** reads your ROM at build time and finds the code by recursive descent from the entry point, code pointers in literal pools and pointer tables, and the entry points learned at runtime (`entries.txt`). About 100,800 instructions are translated.
+- Each contiguous block of code becomes one C function. Every guest instruction becomes straight-line C with its opcode fields as constants, branches inside a block become `goto`s, and calls/returns go through a small address dispatcher.
+- The instruction semantics are mGBA's reference implementation (`isa-thumb.c` / `isa-arm.c`, MPL-2.0), turned into always-inline functions. The compiler folds the decoding away, and the recompiled code stays **cycle-exact** with the interpreter, so interrupts, timers and DMA happen at exactly the same instruction.
+- **RAM code:** the 3D renderer is ARM code that the game unpacks (LZ77) into IWRAM, in several overlays that replace each other between scenes. Each overlay is recompiled from its LZ77 stream in the ROM, and a guard checks the live bytes before a block runs, so the matching overlay is always the one that executes. The boot-time copies to IWRAM and mGBA's HLE BIOS (the interrupt dispatcher) are recompiled the same way.
 - The GBA hardware (video, sound, DMA, timers, interrupts, EEPROM) stays as a runtime library, the same split every console recompilation uses. In this phase that runtime is mGBA's hardware layer.
-- **Lockstep check:** a debug mode runs the interpreter next to the recompiled code and stops at the first instruction block whose registers or memory differ.
-- **Coverage counter:** any address that is not recompiled falls back to the interpreter and is logged. The target is zero fallbacks during a full playthrough.
-- The generated C is derived from the game, so it is **never committed**: you produce it from your own ROM at build time.
+
+**How it is verified**
+- **Coverage:** any address without native code falls back to the interpreter and is counted. `--misses FILE` writes them out, and `tools/recomp/learn.py` turns them into new entry points and RAM-code sources (`ramcode.txt`). Both files hold addresses only, never game bytes.
+- **Equivalence:** `--hashlog FILE` writes a hash of the framebuffer + EWRAM + IWRAM after every frame. The same autoplay run with and without `--interp` must give identical files.
+- Current result on the 3,600-frame autoplay (boot, menus, stage play): **100% native: 0 interpreted instructions, 0 guard misses, per-frame hashes identical to the interpreter.**
+
+**Building it**
+```bash
+cmake -S . -B build/rc -G Ninja -DCMAKE_BUILD_TYPE=Release -DSMBJR_ROM="path/Super Monkey Ball Jr. (USA).gba"
+cmake --build build/rc
+./build/rc/smbjr rom.gba            # F10 switches between native code and the interpreter
+```
+Android/Wear OS builds pick the ROM up from `android/wear/dev-rom/` (or `-PsmbjrRom=path`); `-PnoRecomp` builds the interpreter-only shell. Without a ROM at build time you get the Phase 1 shell. The generated C is derived from the game, so it is **never committed or distributed**: you produce it from your own ROM. A build from another ROM revision detects the mismatch and uses the interpreter.
+
+> ⚠️ A build made with `SMBJR_ROM` (APK, `.exe` or `.wasm`) contains code translated from the game. Keep it for yourself: do not upload it to a store, a release page or a public web host. The public web build is the interpreter-only shell, which asks each player for their own ROM.
 
 ### 🔭 Next phases
+- **Phase 2b, leaner native code:** drop the per-instruction pipeline bookkeeping where it is provably unused, keep registers in locals across a block, and link known call targets directly instead of through the dispatcher.
 - **Phase 3, native analog input:** patch the recompiled input routine so tilt reaches the game as a real analog value instead of D-pad pulses.
 - **Phase 4, native renderer:** replace the game's software 3D rasterizer with a native one for high resolution, true widescreen and 60 fps.
 
@@ -187,6 +204,8 @@ src/input.c    touch/gyro/gamepad/keyboard -> analog -> D-pad PWM, calibration
 src/view.c     round lens, flat menus, widescreen, native HUD, overlay, toasts
 src/sprites.c  GBA sprite decoder (OAM/VRAM) -> RGBA HUD layers
 src/hud.c      SMB Jr HUD groups, OAM detection
+src/recomp/    static recompilation runtime: dispatcher, RAM-code guards, coverage, miss log
+tools/recomp/  recomp.py (ARM/Thumb -> C), learn.py (runtime misses -> entries), entries.txt, ramcode.txt
 web/shell.html web page (ROM, gyro, fullscreen, IndexedDB)
 android/       :wear and :app + common/ (LauncherActivity, GameActivity, RomStore, RomInbox QR transfer)
 externals/     mgba 0.10.5, SDL 3.4.10 (git submodules)
