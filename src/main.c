@@ -4,6 +4,7 @@
 #include <SDL3/SDL_main.h>
 
 #include "emu.h"
+#include "recomp/recomp.h"
 #include "input.h"
 #include "view.h"
 #include "hud.h"
@@ -26,6 +27,9 @@ static struct {
 	bool fast;
 	bool showDebug;
 	int testFrames;  // --test N: scripted autoplay + screenshots, then quit
+	bool interp;  // --interp: run the game on the interpreter instead of the recompiled code
+	const char* missesPath;  // --misses FILE: addresses that fell back to the interpreter, written at exit
+	SDL_IOStream* hashLog;  // --hashlog FILE: per-frame state hash (native vs. interpreter check)
 	int frameNo;
 	char err[512];
 	char note[512];  // last ROM pick error (kept while the loader keeps polling)
@@ -95,6 +99,9 @@ static bool try_load_rom(void) {
 		return false;
 	}
 	A.running = true;
+	if (A.interp) {
+		recomp_set_enabled(false);
+	}
 	A.frameNs = 1e9 / emu_fps();
 	emu_set_hud_split(true);
 	A.lastNs = A.fpsStartNs = SDL_GetTicksNS();
@@ -194,6 +201,12 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
 			SDL_sscanf(argv[++i], "%dx%d", &winW, &winH);
 		} else if (!SDL_strcmp(argv[i], "--test") && i + 1 < argc) {
 			A.testFrames = SDL_atoi(argv[++i]);
+		} else if (!SDL_strcmp(argv[i], "--interp")) {
+			A.interp = true;
+		} else if (!SDL_strcmp(argv[i], "--misses") && i + 1 < argc) {
+			A.missesPath = argv[++i];
+		} else if (!SDL_strcmp(argv[i], "--hashlog") && i + 1 < argc) {
+			A.hashLog = SDL_IOFromFile(argv[++i], "w");
 		} else if (!SDL_strcmp(argv[i], "--touch")) {
 			forceTouch = true;
 		} else if (!SDL_strcmp(argv[i], "--smooth")) {
@@ -403,6 +416,10 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* e) {
 			input_set_pwm(!input_pwm());
 			view_toast(input_pwm() ? "Analogico PWM: ligado" : "Analogico PWM: desligado");
 			break;
+		case SDLK_F10:
+			recomp_set_enabled(!recomp_enabled());
+			view_toast(recomp_enabled() ? "Codigo recompilado (nativo)" : "Interpretador mGBA");
+			break;
 		case SDLK_F9:
 			A.showDebug = !A.showDebug;
 			if (!A.showDebug) view_set_debug(NULL);
@@ -514,6 +531,9 @@ static SDL_AppResult test_iterate(void) {
 	bool shot = false;
 	for (int i = 0; i < 10 && A.frameNo < A.testFrames; ++i) {
 		emu_run_frame(test_keys(A.frameNo));
+		if (A.hashLog) {
+			SDL_IOprintf(A.hashLog, "%d %016llx\n", A.frameNo, (unsigned long long) emu_state_hash());
+		}
 		{
 			static int last = -1;
 			int act = emu_hud_active();
@@ -593,8 +613,26 @@ SDL_AppResult SDL_AppIterate(void* appstate) {
 	return SDL_APP_CONTINUE;
 }
 
+static void recomp_report(void) {
+	if (!recomp_available()) {
+		return;
+	}
+	struct RecompStats st;
+	recomp_stats(&st);
+	SDL_Log("recomp: %s, %d instructions; %llu native runs, %llu interpreted instructions at %u addresses, %u guard misses",
+	        recomp_enabled() ? "native" : "interpreter", st.insnCount, (unsigned long long) st.nativeRuns,
+	        (unsigned long long) st.interpreted, st.missAddresses, st.guardFails);
+	if (A.missesPath && recomp_write_misses(A.missesPath)) {
+		SDL_Log("recomp: misses written to %s", A.missesPath);
+	}
+}
+
 void SDL_AppQuit(void* appstate, SDL_AppResult result) {
+	if (A.hashLog) {
+		SDL_CloseIO(A.hashLog);
+	}
 	if (A.running) {
+		recomp_report();
 		emu_shutdown();
 	}
 	input_shutdown();

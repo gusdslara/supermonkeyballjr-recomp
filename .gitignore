@@ -10,3 +10,6 @@ android/**/.cxx/
 android/local.properties
 .claude/
 web-dist/
+*.iwram
+*.ewram
+misses*.txt

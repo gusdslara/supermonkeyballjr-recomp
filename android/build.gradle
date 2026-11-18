@@ -8,6 +8,20 @@ buildscript {
     }
 }
 
+// Static recompilation (phase 2): the game's code is translated to C at build time from your own
+// ROM. Uses -PsmbjrRom=path/to/rom.gba, else the first .gba in wear/dev-rom/ (gitignored).
+// -PnoRecomp builds the interpreter-only shell.
+def findRecompRom = { ->
+    if (project.hasProperty('noRecomp')) return null
+    if (project.hasProperty('smbjrRom')) return file(project.property('smbjrRom')).absolutePath
+    def rom = file('wear/dev-rom').listFiles()?.find { it.name.toLowerCase().endsWith('.gba') }
+    return rom?.absolutePath
+}
+ext.recompRom = findRecompRom()
+if (ext.recompRom) {
+    logger.lifecycle("smbjr: static recompilation from ${ext.recompRom}")
+}
+
 // Shared native/Java configuration for the phone (:app) and watch (:wear) modules.
 ext.smbNative = { android, String appId ->
     android.with {
@@ -28,6 +42,9 @@ ext.smbNative = { android, String appId ->
                     arguments "-DANDROID_STL=c++_static", "-DANDROID_ARM_NEON=TRUE", "-DCMAKE_BUILD_TYPE=Release",
                               "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
                     cFlags "-O2"
+                    if (rootProject.ext.recompRom) {
+                        arguments "-DSMBJR_ROM=${rootProject.ext.recompRom.replace(File.separator, '/')}"
+                    }
                 }
             }
         }

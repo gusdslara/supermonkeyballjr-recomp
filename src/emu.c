@@ -1,4 +1,5 @@
 #include "emu.h"
+#include "recomp/recomp.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -131,6 +132,11 @@ bool emu_init(const char* romPath, const char* savePath, char* err, int errLen) 
 	s_core->addCoreCallbacks(s_core, &s_callbacks);
 
 	s_core->reset(s_core);
+	if (recomp_attach(s_core)) {
+		struct RecompStats st;
+		recomp_stats(&st);
+		SDL_Log("recomp: %d native instructions in %d chunks", st.insnCount, st.chunkCount);
+	}
 	return true;
 }
 
@@ -220,4 +226,19 @@ void emu_dump_oam(void) {
 		        i, x, y, SW[shape][size], SH[shape][size], aff, aff && (a & 0x200), (a >> 10) & 3, (a >> 13) & 1,
 		        c & 0x3FF, (c >> 10) & 3, c >> 12, aff ? 0 : (b >> 12) & 1, aff ? 0 : (b >> 13) & 1);
 	}
+}
+
+uint64_t emu_state_hash(void) {
+	// Frame picture + work RAM: equal hashes mean the native and interpreted runs did the same thing.
+	struct GBA* gba = s_core->board;
+	uint64_t h = 0xcbf29ce484222325ULL;
+	const uint8_t* parts[3] = { (const uint8_t*) s_fb, (const uint8_t*) gba->memory.wram, (const uint8_t*) gba->memory.iwram };
+	size_t sizes[3] = { EMU_W * EMU_H * 4, 0x40000, 0x8000 };
+	for (int p = 0; p < 3; ++p) {
+		for (size_t i = 0; i < sizes[p]; ++i) {
+			h ^= parts[p][i];
+			h *= 0x100000001b3ULL;
+		}
+	}
+	return h;
 }

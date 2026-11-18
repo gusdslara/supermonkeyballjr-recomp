@@ -68,7 +68,44 @@ set(SMB_SRC
 	src/view.c
 	src/hud.c
 	src/sprites.c
+	src/recomp/recomp.c
 )
+
+# ---------------------------------------------------------------- static recompilation (phase 2)
+# Point SMBJR_ROM at your own ROM to translate the game's code to C at build time. The generated
+# code comes from the game, so it lives only in the build folder and is never committed.
+set(SMBJR_ROM "" CACHE FILEPATH "Super Monkey Ball Jr. (USA) ROM to recompile (empty = interpreter only)")
+if(SMBJR_ROM)
+	find_package(Python3 REQUIRED COMPONENTS Interpreter)
+	set(RC_GEN ${CMAKE_CURRENT_BINARY_DIR}/recomp)
+	set(RC_SRC ${RC_GEN}/rc_table.c)
+	foreach(i RANGE 0 31)
+		if(i LESS 10)
+			list(APPEND RC_SRC ${RC_GEN}/rc_0${i}.c)
+		else()
+			list(APPEND RC_SRC ${RC_GEN}/rc_${i}.c)
+		endif()
+	endforeach()
+	set(RC_TOOL ${CMAKE_CURRENT_SOURCE_DIR}/tools/recomp)
+	add_custom_command(OUTPUT ${RC_SRC} ${RC_GEN}/ops_thumb.h ${RC_GEN}/ops_arm.h
+		COMMAND ${Python3_EXECUTABLE} ${RC_TOOL}/recomp.py --rom ${SMBJR_ROM}
+			--mgba ${CMAKE_CURRENT_SOURCE_DIR}/externals/mgba --entries ${RC_TOOL}/entries.txt --ramcode ${RC_TOOL}/ramcode.txt --out ${RC_GEN}
+		DEPENDS ${RC_TOOL}/recomp.py ${RC_TOOL}/gbarom.py ${RC_TOOL}/opnames.py ${RC_TOOL}/entries.txt
+			${RC_TOOL}/ramcode.txt ${SMBJR_ROM}
+			${CMAKE_CURRENT_SOURCE_DIR}/externals/mgba/src/arm/isa-thumb.c
+			${CMAKE_CURRENT_SOURCE_DIR}/externals/mgba/src/arm/isa-arm.c
+			${CMAKE_CURRENT_SOURCE_DIR}/externals/mgba/src/gba/hle-bios.c
+		COMMENT "Recompiling Super Monkey Ball Jr. to C"
+		VERBATIM)
+	add_library(smbjr_recomp STATIC ${RC_SRC})
+	target_include_directories(smbjr_recomp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/recomp ${RC_GEN})
+	target_link_libraries(smbjr_recomp PRIVATE mgba)
+	if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+		# Generated code is always optimized: it is the game itself.
+		target_compile_options(smbjr_recomp PRIVATE -O2 -w)
+	endif()
+	set_target_properties(smbjr_recomp PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 if(ANDROID)
 	add_library(main SHARED ${SMB_SRC})
@@ -104,6 +141,10 @@ else()
 endif()
 
 target_link_libraries(${SMB_TARGET} PRIVATE SDL3::SDL3 mgba)
+if(SMBJR_ROM)
+	target_link_libraries(${SMB_TARGET} PRIVATE smbjr_recomp)
+	target_compile_definitions(${SMB_TARGET} PRIVATE SMBJR_RECOMP)
+endif()
 if(MINGW)
 	target_link_options(${SMB_TARGET} PRIVATE -static -static-libgcc)
 endif()

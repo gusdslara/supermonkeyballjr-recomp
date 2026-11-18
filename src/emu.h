@@ -44,3 +44,6 @@ void emu_dump_oam(void);
 void emu_set_hud_split(bool on);
 bool emu_hud_active(void);
 const uint32_t* const* emu_hud_layers(void);
+
+// Hash of the framebuffer and work RAM (native vs. interpreter comparison).
+uint64_t emu_state_hash(void);

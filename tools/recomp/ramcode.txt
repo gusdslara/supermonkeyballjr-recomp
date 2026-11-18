@@ -1,0 +1,7 @@
+# Code the game runs from RAM, and where it comes from in the ROM (learned by learn.py).
+# BASE raw ROMADDR LENGTH   |   BASE lz77 ROMADDR
+03003C38 lz77 08332E98
+03003230 raw 080416A0 548
+030024E0 raw 08000154 180
+03003C58 lz77 0807465C
+03003C38 lz77 080749E4
