@@ -1,0 +1,6 @@
+[submodule "externals/SDL"]
+	path = externals/SDL
+	url = https://github.com/libsdl-org/SDL.git
+[submodule "externals/mgba"]
+	path = externals/mgba
+	url = https://github.com/mgba-emu/mgba.git

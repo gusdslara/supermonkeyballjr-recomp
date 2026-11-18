@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Phone launcher shortcut: pick another ROM file (the launcher replaces the current one). -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="choose_rom"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_choose_rom"
+        android:shortcutLongLabel="@string/shortcut_choose_rom_long">
+        <intent
+            android:action="com.wearosports.smbjr.action.CHOOSE_ROM"
+            android:targetPackage="com.wearosports.smbjr"
+            android:targetClass="com.wearosports.smbjr.LauncherActivity" />
+    </shortcut>
+</shortcuts>

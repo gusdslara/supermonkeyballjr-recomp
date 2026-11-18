@@ -1,0 +1,15 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4cad4b8..9e6bd1e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -223,7 +223,9 @@ if(WIN32)
+ 	file(GLOB OS_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/*.c)
+ 	source_group("Windows-specific code" FILES ${OS_SRC})
+ elseif(UNIX)
+-	set(USE_PTHREADS ON)
++	if(NOT EMSCRIPTEN)  # smbjr-wearos: single-threaded WASM, no SharedArrayBuffer needed
++		set(USE_PTHREADS ON)
++	endif()
+ 
+ 	if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+ 		add_definitions(-D_GNU_SOURCE)

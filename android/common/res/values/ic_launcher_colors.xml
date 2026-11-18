@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Rim orange of the round badge: the launcher mask lands on it, so no dark seam shows. -->
+    <color name="ic_launcher_background">#FEB600</color>
+</resources>

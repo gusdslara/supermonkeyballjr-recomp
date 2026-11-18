@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Super Recomp Ball Jr.</title>
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-title" content="Super Recomp Ball Jr.">
+<meta name="application-name" content="Super Recomp Ball Jr.">
+<style>
+  :root {
+    --bg: #000;
+    --bar: rgba(16, 18, 22, 0.78);
+    --bar-border: rgba(255, 255, 255, 0.10);
+    --fg: #f4f4f5;
+    --muted: #a1a1aa;
+    --accent: #fac72e;   /* banana */
+    --accent-fg: #18181b;
+    --ok: #4ade80;
+    --radius: 999px;
+    --gap: 8px;
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 var(--font); overflow: hidden; }
+  /* SDL writes the first window size (720x480) into the inline style and does not update it on
+     smbjr_resize: the page owns the canvas size, so the CSS box always matches the viewport. */
+  canvas { position: fixed; inset: 0; width: 100vw !important; height: 100vh !important; height: 100dvh !important;
+    display: block; touch-action: none; outline: none; -webkit-tap-highlight-color: transparent; }
+  #bar {
+    position: fixed; top: max(8px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
+    display: flex; gap: var(--gap); align-items: center; padding: 6px;
+    background: var(--bar); border: 1px solid var(--bar-border); border-radius: var(--radius);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    z-index: 10; transition: opacity .3s ease; max-width: calc(100vw - 16px);
+  }
+  #bar.idle { opacity: .18; }
+  #bar.idle:hover, #bar.idle:focus-within { opacity: 1; }
+  button, label.btn {
+    all: unset; box-sizing: border-box; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+    min-height: 44px; min-width: 44px; padding: 0 14px; border-radius: var(--radius);
+    color: var(--fg); font-weight: 600; white-space: nowrap; transition: background .15s, transform .1s;
+  }
+  button:hover, label.btn:hover { background: rgba(255,255,255,.08); }
+  button:active, label.btn:active { transform: scale(.96); }
+  button:focus-visible, label.btn:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+  [hidden] { display: none !important; }  /* `all: unset` above would otherwise show hidden buttons */
+  .primary { background: var(--accent); color: var(--accent-fg); }
+  .primary:hover { background: #ffd54f; }
+  .on { color: var(--ok); }
+  svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  #status { color: var(--muted); padding: 0 8px; font-size: 13px; }
+  input[type=file] { display: none; }
+  @media (max-width: 560px) { .label { display: none; } button, label.btn { padding: 0 12px; } }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div id="bar" role="toolbar" aria-label="Controles do jogo">
+  <label class="btn primary" id="romBtn" title="Carregar ROM (.gba)">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    <span class="label" id="romLabel">ROM</span>
+    <input type="file" id="romInput" accept=".gba,application/octet-stream">
+  </label>
+  <button id="gyroBtn" title="Usar giroscopio (inclinar o aparelho)" aria-pressed="false">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg>
+    <span class="label">Giroscopio</span>
+  </button>
+  <button id="calBtn" title="Calibrar posicao neutra" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>
+    <span class="label">Calibrar</span>
+  </button>
+  <button id="fsBtn" title="Tela cheia">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+  </button>
+  <span id="status" aria-live="polite">Carregando...</span>
+</div>
+<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+
+<script>
+  // ?sw=1 (debug/headless capture): software renderer + timer-driven frames, so the canvas can
+  // be read back and the game keeps running even when the page is not on screen.
+  const DEBUG_SW = new URLSearchParams(location.search).get('sw') === '1';
+  if (DEBUG_SW) window.requestAnimationFrame = (cb) => setTimeout(() => cb(performance.now()), 16);
+
+  // Saves + the user's ROM live in this browser only (IndexedDB), under SDL's pref path.
+  const PREF = '/libsdl/wearosports/smbjr/';
+  const statusEl = document.getElementById('status');
+  const setStatus = (t) => { statusEl.textContent = t; };
+  let started = false, gyroOn = false;
+
+  function persist() {
+    try { FS.syncfs(false, (e) => { if (e) console.warn('syncfs', e); }); } catch (e) {}
+  }
+  function romPresent() {
+    try { return FS.analyzePath(PREF + 'rom.gba').exists; } catch (e) { return false; }
+  }
+  function refreshRomUi() {
+    const has = romPresent();
+    document.getElementById('romLabel').textContent = has ? 'Trocar ROM' : 'Carregar ROM';
+    document.getElementById('romBtn').classList.toggle('primary', !has);
+    setStatus(has ? 'Pronto' : 'Escolha ou arraste o seu arquivo .gba');
+  }
+
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    preRun: [function () {
+      // ?sw=1: software renderer (debug: lets the canvas be captured with toDataURL).
+      if (DEBUG_SW) ENV.SDL_RENDER_DRIVER = 'software';
+      FS.mkdirTree('/libsdl');
+      FS.mount(IDBFS, {}, '/libsdl');
+      Module.addRunDependency('idbfs');
+      FS.syncfs(true, function (err) {
+        if (err) console.warn('IDBFS', err);
+        try { FS.mkdirTree(PREF); } catch (e) {}
+        Module.removeRunDependency('idbfs');
+      });
+    }],
+    onRuntimeInitialized: function () {
+      started = true;
+      refreshRomUi();
+      setInterval(persist, 4000);  // flush EEPROM saves
+      setTimeout(fit, 0);
+    },
+    print: (t) => console.log(t),
+    printErr: (t) => console.warn(t),
+  };
+  // Canvas always fills the viewport (phones, ultrawide, rotation); the game picks its layout.
+  function fit() {
+    if (!started) return;
+    try { Module.ccall('smbjr_resize', null, ['number', 'number'], [innerWidth, innerHeight]); } catch (e) {}
+  }
+  window.addEventListener('resize', fit);
+  window.addEventListener('orientationchange', () => setTimeout(fit, 250));
+  document.addEventListener('fullscreenchange', () => setTimeout(fit, 100));
+  document.addEventListener('visibilitychange', () => { if (document.hidden) persist(); });
+  window.addEventListener('pagehide', persist);
+
+  // ROM import: validated header, stored privately, picked up by the game automatically.
+  async function importRom(file) {
+    if (!file) return;
+    if (!started) { setStatus('Aguarde carregar...'); return; }
+    if (/\.(zip|7z|rar)$/i.test(file.name)) { setStatus('Descompacte o arquivo e escolha o .gba'); return; }
+    if (file.size > (32 << 20)) { setStatus('Arquivo grande demais para uma ROM de GBA'); return; }
+    let buf;
+    try { buf = new Uint8Array(await file.arrayBuffer()); } catch (e) { setStatus('Nao foi possivel ler o arquivo'); return; }
+    if (buf.length < 0xC0 || buf[0xB2] !== 0x96) { setStatus('Arquivo nao e uma ROM de GBA'); return; }
+    const title = String.fromCharCode(...buf.slice(0xA0, 0xAC)).replace(/\0/g, '').trim();
+    // Same rule as the native loader: any region of Super Monkey Ball Jr., nothing else.
+    if (title !== 'MONKEYBALLJR') { setStatus('ROM de outro jogo (' + (title || '?') + '): escolha Super Monkey Ball Jr.'); return; }
+    const replacing = romPresent();
+    try { FS.writeFile(PREF + 'rom.gba', buf); } catch (e) { setStatus('Falha ao salvar a ROM'); return; }
+    // Wait for IndexedDB before a reload, or the new ROM would be lost.
+    FS.syncfs(false, () => {
+      setStatus('ROM carregada');
+      if (replacing) setTimeout(() => location.reload(), 300);
+      else refreshRomUi();
+    });
+  }
+  document.getElementById('romInput').addEventListener('change', (ev) => {
+    const file = ev.target.files[0];
+    ev.target.value = '';  // picking the same file again must fire 'change' again
+    importRom(file);
+  });
+  // Drag & drop a .gba anywhere on the page.
+  window.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const f = e.dataTransfer && e.dataTransfer.files[0];
+    if (f) importRom(f);
+  });
+
+  // Motion sensors: iOS needs an explicit permission from a user gesture.
+  document.getElementById('gyroBtn').addEventListener('click', async () => {
+    try {
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        const r = await DeviceMotionEvent.requestPermission();
+        if (r !== 'granted') { setStatus('Permissao de movimento negada'); return; }
+      }
+    } catch (e) { setStatus('Sensor indisponivel'); return; }
+    gyroOn = !gyroOn;
+    Module.ccall('smbjr_set_control_mode', null, ['number'], [gyroOn ? 2 : 0]);  // 2 = gyro + finger
+    const b = document.getElementById('gyroBtn');
+    b.classList.toggle('on', gyroOn);
+    b.setAttribute('aria-pressed', String(gyroOn));
+    document.getElementById('calBtn').hidden = !gyroOn;
+    setStatus(gyroOn ? 'Incline para rolar' : 'Controle por toque');
+  });
+  document.getElementById('calBtn').addEventListener('click', () => {
+    Module.ccall('smbjr_calibrate', null, [], []);
+    setStatus('Calibrado');
+  });
+
+  document.getElementById('fsBtn').addEventListener('click', async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+        try { await screen.orientation.lock('landscape'); } catch (e) {}
+      } else {
+        await document.exitFullscreen();
+      }
+    } catch (e) {}
+  });
+
+  // Toolbar fades while playing; any pointer movement brings it back.
+  const bar = document.getElementById('bar');
+  let idleTimer;
+  const wake = () => { bar.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => romPresent() && bar.classList.add('idle'), 3500); };
+  ['pointermove', 'pointerdown', 'keydown'].forEach((e) => window.addEventListener(e, wake, { passive: true }));
+  wake();
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

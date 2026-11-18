@@ -1,0 +1,33 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace "com.wearosports.smbjr.wear"
+}
+rootProject.ext.smbNative(android, "com.wearosports.smbjr.wear")
+
+dependencies {
+    implementation 'com.google.zxing:core:3.5.3'
+}
+
+// Debug builds carry the ROM from wear/dev-rom/ (any .gba; *.gba is gitignored, never committed)
+// as assets/devrom/<name>.gba and the watch imports it on first launch, like the FireRed port.
+// Release builds, or `gradlew :wear:assembleDebug -PwearNoRom`, leave it out: the watch then
+// shows the Wi-Fi/QR transfer screen.
+def devRomDir = file('dev-rom')
+def devRomAssets = layout.buildDirectory.dir('generated/dev-rom-assets')
+def syncDevRom = tasks.register('syncDevRom', Sync) {
+    from(devRomDir) {
+        include '*.gba', '*.GBA'
+        into 'devrom'
+    }
+    into devRomAssets
+}
+if (!project.hasProperty('wearNoRom')) {
+    android.sourceSets.debug.assets.srcDir(devRomAssets)
+    tasks.named('preBuild') { dependsOn syncDevRom }
+    if (!(devRomDir.listFiles()?.any { it.name.toLowerCase().endsWith('.gba') })) {
+        logger.warn("wear: no ROM in ${devRomDir} -- this debug build will ask for it over Wi-Fi (QR).")
+    }
+}

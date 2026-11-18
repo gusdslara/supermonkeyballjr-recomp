@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_choose_rom">Trocar ROM</string>
+    <string name="shortcut_choose_rom_long">Escolher outro arquivo .gba</string>
+</resources>

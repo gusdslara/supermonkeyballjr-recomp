@@ -1,0 +1,12 @@
+build/
+shots/
+*.log
+*.gba
+*.sav
+*.ss1
+android/.gradle/
+android/**/build/
+android/**/.cxx/
+android/local.properties
+.claude/
+web-dist/

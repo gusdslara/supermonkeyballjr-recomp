@@ -1,0 +1,75 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.2.2'
+    }
+}
+
+// Shared native/Java configuration for the phone (:app) and watch (:wear) modules.
+ext.smbNative = { android, String appId ->
+    android.with {
+        compileSdkVersion 34
+        ndkVersion "27.0.12077973"
+        defaultConfig {
+            applicationId appId
+            minSdkVersion 26
+            targetSdkVersion 34
+            versionCode 1
+            versionName "0.1.0"
+            ndk {
+                abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+            }
+            externalNativeBuild {
+                cmake {
+                    // 16 KB page size (Android 15+): NDK r27 links every .so with max-page-size=16384.
+                    arguments "-DANDROID_STL=c++_static", "-DANDROID_ARM_NEON=TRUE", "-DCMAKE_BUILD_TYPE=Release",
+                              "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
+                    cFlags "-O2"
+                }
+            }
+        }
+        buildTypes {
+            debug {
+                // Emulation speed matters even on debug builds.
+                externalNativeBuild { cmake { arguments "-DCMAKE_BUILD_TYPE=Release" } }
+            }
+            release {
+                minifyEnabled false
+                signingConfig signingConfigs.debug
+            }
+        }
+        externalNativeBuild {
+            cmake {
+                path "../../CMakeLists.txt"
+                version "3.22.1"
+            }
+        }
+        sourceSets {
+            main {
+                java.srcDirs = [
+                    'src/main/java',
+                    '../common/java',
+                    '../../externals/SDL/android-project/app/src/main/java'
+                ]
+                res.srcDirs = ['src/main/res', '../common/res']
+            }
+        }
+        // AGP 8.2 does not 16 KB-align stored .so files in the APK; compressed libs are
+        // extracted at install time instead, which satisfies the 16 KB page-size check.
+        packagingOptions {
+            jniLibs {
+                useLegacyPackaging true
+            }
+        }
+        compileOptions {
+            sourceCompatibility JavaVersion.VERSION_1_8
+            targetCompatibility JavaVersion.VERSION_1_8
+        }
+        lint {
+            abortOnError false
+        }
+    }
+}
