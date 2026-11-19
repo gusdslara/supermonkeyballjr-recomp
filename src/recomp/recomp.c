@@ -12,6 +12,8 @@
 
 #include "rc_prelude.h"
 
+#include <SDL3/SDL_timer.h>
+
 #ifdef SMBJR_RECOMP
 extern const struct RecompChunk recomp_chunks[];
 extern const int recomp_chunk_count;
@@ -234,6 +236,24 @@ static void run_loop_core(struct mCore* core) {
 	}
 }
 
+// ------------------------------------------------------------------ profiling
+// Time spent in the GBA hardware (video, audio, DMA, timers: everything mGBA does between CPU slices),
+// measured the same way in both modes so the CPU share can be compared.
+static void (*s_processEvents)(struct ARMCore*);
+static uint64_t s_hwNs;
+
+static void timed_process_events(struct ARMCore* cpu) {
+	uint64_t t0 = SDL_GetTicksNS();
+	s_processEvents(cpu);
+	s_hwNs += SDL_GetTicksNS() - t0;
+}
+
+uint64_t recomp_take_hw_ns(void) {
+	uint64_t v = s_hwNs;
+	s_hwNs = 0;
+	return v;
+}
+
 // ------------------------------------------------------------------ public API
 bool recomp_available(void) {
 	return recomp_chunk_count > 0;
@@ -266,6 +286,11 @@ bool recomp_attach(struct mCore* core) {
 	s_gba = gba;
 	s_core = core;
 	core->runFrame = run_frame;
+	struct ARMCore* cpu = core->cpu;
+	if (cpu->irqh.processEvents != timed_process_events) {
+		s_processEvents = cpu->irqh.processEvents;
+		cpu->irqh.processEvents = timed_process_events;
+	}
 	core->runLoop = run_loop_core;
 	memset(&s_stats, 0, sizeof(s_stats));
 	memset(s_missKey, 0, sizeof(s_missKey));

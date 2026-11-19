@@ -28,6 +28,9 @@ struct RecompStats {
 };
 void recomp_stats(struct RecompStats* out);
 
+// Nanoseconds spent in the GBA hardware emulation since the last call (profiling).
+uint64_t recomp_take_hw_ns(void);
+
 // Writes every address that fell back to the interpreter, in tools/recomp/entries.txt format
 // (RAM code is written as "mode ram_addr rom_source_addr" when its bytes are found in the ROM).
 bool recomp_write_misses(const char* path);

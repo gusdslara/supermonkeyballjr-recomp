@@ -14,6 +14,9 @@
 #include <mgba-util/vfs.h>
 
 #include <SDL3/SDL.h>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 #include "hud.h"
 #include "sprites.h"
@@ -158,9 +161,38 @@ void emu_reset(void) {
 	}
 }
 
+// Emulated-frame timing (CPU work only, no rendering), logged every PERF_FRAMES frames. On Android,
+// `adb shell setprop debug.smbjr.ab 1` alternates native code and the interpreter at each report.
+enum { PERF_FRAMES = 600 };
+static uint64_t s_perfNs;
+static int s_perfFrames;
+
+static bool perf_ab(void) {
+#ifdef __ANDROID__
+	char v[PROP_VALUE_MAX] = { 0 };
+	__system_property_get("debug.smbjr.ab", v);
+	return v[0] == '1';
+#else
+	return SDL_GetHintBoolean("SMBJR_AB", false);
+#endif
+}
+
 void emu_run_frame(uint16_t keys) {
 	s_core->setKeys(s_core, keys);
+	uint64_t t0 = SDL_GetTicksNS();
 	s_core->runFrame(s_core);
+	s_perfNs += SDL_GetTicksNS() - t0;
+	if (++s_perfFrames == PERF_FRAMES) {
+		double hw = recomp_take_hw_ns() / 1e6 / s_perfFrames;
+		double all = s_perfNs / 1e6 / s_perfFrames;
+		SDL_Log("perf: %s %.3f ms/frame = cpu %.3f + hardware %.3f (%d frames)",
+		        recomp_enabled() ? "native" : "interpreter", all, all - hw, hw, s_perfFrames);
+		s_perfNs = 0;
+		s_perfFrames = 0;
+		if (recomp_available() && perf_ab()) {
+			recomp_set_enabled(!recomp_enabled());
+		}
+	}
 }
 
 const uint32_t* emu_framebuffer(void) {
