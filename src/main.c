@@ -617,6 +617,12 @@ static void recomp_report(void) {
 	if (!recomp_available()) {
 		return;
 	}
+#ifdef RC_STATS
+	{
+		void recomp_stats_report(int frames);
+		recomp_stats_report(A.frameNo ? A.frameNo : 1);
+	}
+#endif
 	struct RecompStats st;
 	recomp_stats(&st);
 	SDL_Log("recomp: %s, %d instructions; %llu native runs, %llu interpreted instructions at %u addresses, %u guard misses",

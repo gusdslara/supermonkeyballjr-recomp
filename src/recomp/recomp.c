@@ -177,8 +177,14 @@ static void w_store8(struct ARMCore* cpu, uint32_t a, int8_t v, int* cc) {
 	ram_write(a, 0xFFFFFF, 1);
 	s_mem.store8(cpu, a, v, cc);
 }
+#ifdef RC_STATS
+static uint64_t s_statStm[16];
+#endif
 static uint32_t w_storeMultiple(struct ARMCore* cpu, uint32_t base, int mask, enum LSMDirection dir, int* cc) {
 	unsigned r = base >> 24;
+#ifdef RC_STATS
+	++s_statStm[r & 15];
+#endif
 	if (rc_codeBits[r & 15] && (r == 0x2 || r == 0x3)) {
 		// At most 16 words on either side of the base address.
 		uint32_t size = region_size(r, s_gba);
@@ -201,6 +207,38 @@ static void w_swi32(struct ARMCore* cpu, int imm) {
 		++rc_codeGen;
 	}
 }
+
+#ifdef RC_STATS
+uint64_t rc_statInsns, rc_statSlowLoad[16], rc_statSlowStore[16];
+static uint64_t s_statActive, s_statLdm[16];
+static void (*s_setActive)(struct ARMCore*, uint32_t);
+static uint32_t (*s_ldm)(struct ARMCore*, uint32_t, int, enum LSMDirection, int*);
+static void st_setActive(struct ARMCore* cpu, uint32_t a) {
+	++s_statActive;
+	s_setActive(cpu, a);
+}
+static uint32_t st_ldm(struct ARMCore* cpu, uint32_t b, int m, enum LSMDirection d, int* cc) {
+	++s_statLdm[(b >> 24) & 15];
+	return s_ldm(cpu, b, m, d, cc);
+}
+static void stats_hook(struct ARMCore* cpu) {
+	s_setActive = cpu->memory.setActiveRegion;
+	cpu->memory.setActiveRegion = st_setActive;
+	s_ldm = cpu->memory.loadMultiple;
+	cpu->memory.loadMultiple = st_ldm;
+}
+void recomp_stats_report(int frames) {
+	fprintf(stderr, "stats/frame: insns %.0f  dispatch %.0f  setActiveRegion %.0f\n", rc_statInsns / (double) frames,
+	        s_stats.nativeRuns / (double) frames, s_statActive / (double) frames);
+	for (int r = 0; r < 16; ++r) {
+		if (rc_statSlowLoad[r] || rc_statSlowStore[r] || s_statLdm[r] || s_statStm[r]) {
+			fprintf(stderr, "  region %X: slow loads %.0f  slow stores %.0f  ldm %.0f  stm %.0f\n", r,
+			        rc_statSlowLoad[r] / (double) frames, rc_statSlowStore[r] / (double) frames,
+			        s_statLdm[r] / (double) frames, s_statStm[r] / (double) frames);
+		}
+	}
+}
+#endif
 
 void recomp_invalidate(void) {
 	++rc_codeGen;
@@ -383,6 +421,9 @@ bool recomp_attach(struct mCore* core) {
 		cpu->memory.store8 = w_store8;
 		cpu->memory.storeMultiple = w_storeMultiple;
 		s_irqh = cpu->irqh;
+#ifdef RC_STATS
+		stats_hook(cpu);
+#endif
 		cpu->irqh.swi16 = w_swi16;
 		cpu->irqh.swi32 = w_swi32;
 	}

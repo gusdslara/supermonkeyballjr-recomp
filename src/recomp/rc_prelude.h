@@ -36,8 +36,17 @@ struct RecompChunk {
 	cpu->prefetch[0] = (P0); \
 	cpu->prefetch[1] = (P1);
 
+// Profiling build (-DRC_STATS): counts guest instructions and slow-path memory accesses per region.
+#ifdef RC_STATS
+extern uint64_t rc_statInsns, rc_statSlowLoad[16], rc_statSlowStore[16];
+#define RC_STAT(x) (x)
+#else
+#define RC_STAT(x) ((void) 0)
+#endif
+
 // After each instruction: hand control back when an event (IRQ, timer, DMA, video) is due.
 #define RC_EVENT() \
+	RC_STAT(++rc_statInsns); \
 	if (RC_UNLIKELY(cpu->cycles >= cpu->nextEvent)) return 1;
 
 // Thumb instruction that may write PC. NEXT = gprs[15] when it did not branch.
@@ -106,6 +115,7 @@ static RC_INLINE uint32_t rc_load32(struct ARMCore* cpu, uint32_t a, int* cc) {
 		int rotate = (a & 3) << 3;  // ROR does not parenthesize its argument
 		return ROR(v, rotate);
 	}
+	RC_STAT(++rc_statSlowLoad[r & 15]);
 	return cpu->memory.load32(cpu, a, cc);
 }
 
@@ -128,6 +138,7 @@ static RC_INLINE uint32_t rc_load16(struct ARMCore* cpu, uint32_t a, int* cc) {
 		int rotate = (a & 1) << 3;
 		return ROR(v, rotate);
 	}
+	RC_STAT(++rc_statSlowLoad[r & 15]);
 	return cpu->memory.load16(cpu, a, cc);
 }
 
@@ -149,6 +160,7 @@ static RC_INLINE uint32_t rc_load8(struct ARMCore* cpu, uint32_t a, int* cc) {
 		}
 		return v;
 	}
+	RC_STAT(++rc_statSlowLoad[r & 15]);
 	return cpu->memory.load8(cpu, a, cc);
 }
 
@@ -173,6 +185,7 @@ static RC_INLINE void rc_store32(struct ARMCore* cpu, uint32_t a, int32_t value,
 		}
 		return;
 	}
+	RC_STAT(++rc_statSlowStore[r & 15]);
 	cpu->memory.store32(cpu, a, value, cc);
 }
 
@@ -197,6 +210,7 @@ static RC_INLINE void rc_store16(struct ARMCore* cpu, uint32_t a, int16_t value,
 		}
 		return;
 	}
+	RC_STAT(++rc_statSlowStore[r & 15]);
 	cpu->memory.store16(cpu, a, value, cc);
 }
 
@@ -221,12 +235,14 @@ static RC_INLINE void rc_store8(struct ARMCore* cpu, uint32_t a, int8_t value, i
 		}
 		return;
 	}
+	RC_STAT(++rc_statSlowStore[r & 15]);
 	cpu->memory.store8(cpu, a, value, cc);
 }
 
 // Simple ALU instructions skip RC_PRE (they never look at PC or prefetch); the interpreter-visible
 // state is written only when control leaves the chunk after one of them.
 #define RC_EVENT_AT(PC, P0, P1) \
+	RC_STAT(++rc_statInsns); \
 	if (RC_UNLIKELY(cpu->cycles >= cpu->nextEvent)) { \
 		RC_PRE(PC, P0, P1) \
 		return 1; \
