@@ -210,6 +210,7 @@ static void w_swi32(struct ARMCore* cpu, int imm) {
 
 #ifdef RC_STATS
 uint64_t rc_statInsns, rc_statSlowLoad[16], rc_statSlowStore[16];
+uint64_t rc_statChunk[8192];
 static uint64_t s_statActive, s_statLdm[16];
 static void (*s_setActive)(struct ARMCore*, uint32_t);
 static uint32_t (*s_ldm)(struct ARMCore*, uint32_t, int, enum LSMDirection, int*);
@@ -230,6 +231,16 @@ static void stats_hook(struct ARMCore* cpu) {
 void recomp_stats_report(int frames) {
 	fprintf(stderr, "stats/frame: insns %.0f  dispatch %.0f  setActiveRegion %.0f\n", rc_statInsns / (double) frames,
 	        s_stats.nativeRuns / (double) frames, s_statActive / (double) frames);
+	for (int k = 0; k < 15; ++k) {  // hottest chunks
+		int best = -1;
+		for (int i = 0; i < recomp_chunk_count && i < 8192; ++i) {
+			if (rc_statChunk[i] && (best < 0 || rc_statChunk[i] > rc_statChunk[best])) best = i;
+		}
+		if (best < 0) break;
+		fprintf(stderr, "  hot %08X-%08X %s %.0f insns/frame\n", recomp_chunks[best].start, recomp_chunks[best].end,
+		        recomp_chunks[best].thumb ? "T" : "A", rc_statChunk[best] / (double) frames);
+		rc_statChunk[best] = 0;
+	}
 	for (int r = 0; r < 16; ++r) {
 		if (rc_statSlowLoad[r] || rc_statSlowStore[r] || s_statLdm[r] || s_statStm[r]) {
 			fprintf(stderr, "  region %X: slow loads %.0f  slow stores %.0f  ldm %.0f  stm %.0f\n", r,

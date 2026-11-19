@@ -38,7 +38,7 @@ struct RecompChunk {
 
 // Profiling build (-DRC_STATS): counts guest instructions and slow-path memory accesses per region.
 #ifdef RC_STATS
-extern uint64_t rc_statInsns, rc_statSlowLoad[16], rc_statSlowStore[16];
+extern uint64_t rc_statInsns, rc_statSlowLoad[16], rc_statSlowStore[16], rc_statChunk[];
 #define RC_STAT(x) (x)
 #else
 #define RC_STAT(x) ((void) 0)
@@ -46,7 +46,7 @@ extern uint64_t rc_statInsns, rc_statSlowLoad[16], rc_statSlowStore[16];
 
 // After each instruction: hand control back when an event (IRQ, timer, DMA, video) is due.
 #define RC_EVENT() \
-	RC_STAT(++rc_statInsns); \
+	RC_STAT((++rc_statInsns, ++rc_statChunk[RC_CID])); \
 	if (RC_UNLIKELY(cpu->cycles >= cpu->nextEvent)) return 1;
 
 // Thumb instruction that may write PC. NEXT = gprs[15] when it did not branch.
@@ -242,8 +242,87 @@ static RC_INLINE void rc_store8(struct ARMCore* cpu, uint32_t a, int8_t value, i
 // Simple ALU instructions skip RC_PRE (they never look at PC or prefetch); the interpreter-visible
 // state is written only when control leaves the chunk after one of them.
 #define RC_EVENT_AT(PC, P0, P1) \
-	RC_STAT(++rc_statInsns); \
+	RC_STAT((++rc_statInsns, ++rc_statChunk[RC_CID])); \
 	if (RC_UNLIKELY(cpu->cycles >= cpu->nextEvent)) { \
 		RC_PRE(PC, P0, P1) \
 		return 1; \
 	}
+
+// ------------------------------------------------------------------ register-cached ARM (armfast.py)
+// r0-r14, NZCV and the cycle counter in locals; the ARMCore is synced only where mGBA needs it.
+#define RCF_DECL \
+	uint32_t R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14; \
+	uint32_t FN, FZ, FC, FV; \
+	int32_t CYC, NEV, PF, NS, CC; \
+	const struct GBAMemory* MEM = RC_MEM(cpu); \
+	(void) MEM; (void) CC;
+
+#define RCF_REFRESH \
+	NEV = cpu->nextEvent; \
+	PF = 1 + cpu->memory.activeSeqCycles32; \
+	NS = cpu->memory.activeNonseqCycles32 - cpu->memory.activeSeqCycles32;
+
+#define RCF_IN \
+	R0 = cpu->gprs[0]; R1 = cpu->gprs[1]; R2 = cpu->gprs[2]; R3 = cpu->gprs[3]; \
+	R4 = cpu->gprs[4]; R5 = cpu->gprs[5]; R6 = cpu->gprs[6]; R7 = cpu->gprs[7]; \
+	R8 = cpu->gprs[8]; R9 = cpu->gprs[9]; R10 = cpu->gprs[10]; R11 = cpu->gprs[11]; \
+	R12 = cpu->gprs[12]; R13 = cpu->gprs[13]; R14 = cpu->gprs[14]; \
+	FN = cpu->cpsr.n; FZ = cpu->cpsr.z; FC = cpu->cpsr.c; FV = cpu->cpsr.v; \
+	CYC = cpu->cycles; \
+	RCF_REFRESH
+
+#define RCF_OUT_REGS \
+	cpu->gprs[0] = R0; cpu->gprs[1] = R1; cpu->gprs[2] = R2; cpu->gprs[3] = R3; \
+	cpu->gprs[4] = R4; cpu->gprs[5] = R5; cpu->gprs[6] = R6; cpu->gprs[7] = R7; \
+	cpu->gprs[8] = R8; cpu->gprs[9] = R9; cpu->gprs[10] = R10; cpu->gprs[11] = R11; \
+	cpu->gprs[12] = R12; cpu->gprs[13] = R13; cpu->gprs[14] = R14; \
+	cpu->cpsr.n = FN; cpu->cpsr.z = FZ; cpu->cpsr.c = FC; cpu->cpsr.v = FV;
+
+#define RCF_OUT RCF_OUT_REGS cpu->cycles = CYC;
+
+// After an instruction: leave the chunk when an event is due (interpreter-visible state written).
+#define RCF_EVENT(PC, P0, P1) \
+	if (RC_UNLIKELY(CYC >= NEV)) { \
+		RCF_OUT RC_PRE(PC, P0, P1) \
+		return 1; \
+	}
+
+// Memory access: inline for IWRAM/EWRAM; anything else goes to mGBA with the ARMCore synced
+// (timers read cpu->cycles, open bus reads prefetch, IO writes may reschedule events).
+#define RCF_MEM(FAST, SLOW, PC, P0, P1) \
+	if (((a >> 24) - 2u) < 2u) { \
+		FAST; \
+	} else { \
+		RCF_OUT RC_PRE(PC, P0, P1) \
+		SLOW; \
+		RCF_REFRESH \
+	}
+
+#define RCF_ADD_FLAGS(M, N, D) \
+	FN = (D) >> 31; FZ = !(D); \
+	FC = ((M) >> 31) + ((N) >> 31) > ((D) >> 31); \
+	FV = !(((M) ^ (N)) >> 31) && (((M) ^ (D)) >> 31);
+
+#define RCF_SUB_FLAGS(M, N, D) \
+	FN = (D) >> 31; FZ = !(D); \
+	FC = (M) >= (N); \
+	FV = (((M) ^ (N)) >> 31) && (((M) ^ (D)) >> 31);
+
+#define RCF_SBC_FLAGS(M, N, D, B) \
+	FN = (D) >> 31; FZ = !(D); \
+	FC = (uint64_t) (M) >= (uint64_t) (N) + (uint64_t) (B); \
+	FV = (((M) ^ (N)) >> 31) && (((M) ^ (D)) >> 31);
+
+static RC_INLINE int32_t RCF_SMUL_WAIT(uint32_t r, int32_t wait) {
+	if ((r & 0xFFFFFF00u) == 0xFFFFFF00u || !(r & 0xFFFFFF00u)) return wait + 1;
+	if ((r & 0xFFFF0000u) == 0xFFFF0000u || !(r & 0xFFFF0000u)) return wait + 2;
+	if ((r & 0xFF000000u) == 0xFF000000u || !(r & 0xFF000000u)) return wait + 3;
+	return wait + 4;
+}
+
+static RC_INLINE int32_t RCF_UMUL_WAIT(uint32_t r, int32_t wait) {
+	if (!(r & 0xFFFFFF00u)) return wait + 1;
+	if (!(r & 0xFFFF0000u)) return wait + 2;
+	if (!(r & 0xFF000000u)) return wait + 3;
+	return wait + 4;
+}

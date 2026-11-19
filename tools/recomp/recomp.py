@@ -23,6 +23,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gbarom import read_ramcode  # noqa: E402
 from opnames import ARM, THUMB  # noqa: E402
+import armfast  # noqa: E402
 
 ROM_BASE = 0x08000000
 SHARDS = 32          # fixed number of generated .c files (CMake needs the list at configure time)
@@ -388,6 +389,10 @@ def main():
         for c in chunks_of(addrs, 2 if mode == "T" else 4):
             chunks.append((sp, mode, c, "rc_%s_%s%08X" % (sp.name, mode, c[0])))
 
+    chunk_index = {c[3]: i for i, c in enumerate(chunks)}
+    armfast.arm_name_of = arm_name
+    fast_native = fast_total = 0
+
     # Balance chunks over shards by instruction count; Thumb and ARM never share a file.
     shards = [[] for _ in range(SHARDS)]
     load = [0] * SHARDS
@@ -403,7 +408,16 @@ def main():
         ops = "ops_arm.h" if i in arm_shards else "ops_thumb.h"
         body = ['#include "rc_prelude.h"', '#include "%s"' % ops, ""]
         for sp, mode, addrs, fname in shard:
-            body.append(emit_chunk(sp, mode, addrs, fname))
+            # RC_CID: this chunk's index in recomp_chunks (per-chunk counters in RC_STATS builds).
+            body.append("#define RC_CID %d" % chunk_index[fname])
+            if mode == "A" and sp.ram and (sp.base >> 24) in (2, 3) and not os.environ.get("RECOMP_NO_ARMFAST"):
+                src, n = armfast.emit(sp, addrs, fname, arm_flow)
+                fast_native += n
+                fast_total += len(addrs)
+                body.append(src)
+            else:
+                body.append(emit_chunk(sp, mode, addrs, fname))
+            body.append("#undef RC_CID")
         with open(os.path.join(args.out, "rc_%02d.c" % i), "w", encoding="utf-8") as f:
             f.write("\n".join(body))
 
@@ -435,6 +449,7 @@ def main():
     for sp, mode, addrs, _ in chunks:
         k = "%s/%s" % ("ram" if sp.ram else "rom", mode)
         by[k] = by.get(k, 0) + len(addrs)
+    print("recomp: register-cached ARM: %d of %d instructions translated natively" % (fast_native, fast_total))
     print("recomp: %d instructions in %d chunks %s (rom sha1 %s)"
           % (total, len(chunks), by, hashlib.sha1(data).hexdigest()[:12]))
 
