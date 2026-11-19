@@ -40,6 +40,13 @@ static struct RecompStats s_stats;
 static int* s_guarded;  // indexes of the chunks that run from RAM (or the BIOS)
 static int s_guardedCount;
 
+// Code guards: a guarded chunk is checked against live memory once, and again only after something
+// wrote onto RAM code bytes (rc_codeGen changes). See rc_code_write in rc_prelude.h.
+uint8_t* rc_codeBits[16];
+uint32_t rc_codeGen = 1;
+static uint32_t* s_validGen;
+static bool s_noGuardCache;  // RC_NOCACHE=1: check every entry (debugging)  // per chunk: rc_codeGen value at its last successful check
+
 static uint32_t region_size(unsigned region, const struct GBA* gba) {
 	switch (region) {
 	case 0x0: return 0x4000;              // BIOS
@@ -72,12 +79,34 @@ static void maps_free(void) {
 
 static bool maps_build(const struct GBA* gba) {
 	maps_free();
+	for (int r = 0; r < 16; ++r) {
+		free(rc_codeBits[r]);
+		rc_codeBits[r] = NULL;
+	}
+	free(s_validGen);
+	s_validGen = calloc(recomp_chunk_count + 1, sizeof(uint32_t));
+	if (!s_validGen) {
+		return false;
+	}
+	++rc_codeGen;
 	free(s_guarded);
 	s_guarded = calloc(recomp_chunk_count + 1, sizeof(int));
 	s_guardedCount = 0;
 	for (int i = 0; i < recomp_chunk_count; ++i) {
-		if (recomp_chunks[i].guard) {
-			s_guarded[s_guardedCount++] = i;
+		const struct RecompChunk* c = &recomp_chunks[i];
+		if (!c->guard) {
+			continue;
+		}
+		s_guarded[s_guardedCount++] = i;
+		unsigned r = c->start >> 24;
+		if (r == 0x2 || r == 0x3) {  // writable RAM: mark the code bytes
+			uint32_t size = region_size(r, gba);
+			if (!rc_codeBits[r] && !(rc_codeBits[r] = calloc(size / 8, 1))) {
+				return false;
+			}
+			for (uint32_t a = c->start & 0xFFFFFF; a < (c->end & 0xFFFFFF) && a < size; ++a) {
+				rc_codeBits[r][a >> 3] |= (uint8_t) (1u << (a & 7));
+			}
 		}
 	}
 	for (int i = 0; i < recomp_chunk_count; ++i) {
@@ -113,8 +142,68 @@ static inline const struct RecompChunk* lookup(uint32_t pc, int thumb) {
 }
 
 static inline bool guard_ok(const struct RecompChunk* c) {
+	size_t idx = (size_t) (c - recomp_chunks);
+	if (s_validGen[idx] == rc_codeGen && !s_noGuardCache) {
+		return true;
+	}
 	const uint8_t* live = region_live(c->start >> 24, s_gba);
-	return live && !memcmp(live + (c->start & 0xFFFFFF), c->guard, c->guardLen);
+	if (live && !memcmp(live + (c->start & 0xFFFFFF), c->guard, c->guardLen)) {
+		s_validGen[idx] = rc_codeGen;
+		return true;
+	}
+	return false;
+}
+
+static inline void ram_write(uint32_t a, uint32_t align, uint32_t size) {
+	unsigned r = a >> 24;
+	if (r == 0x2 || r == 0x3) {
+		rc_code_write(r, a & align & (region_size(r, s_gba) - 1), size);
+	}
+}
+
+// mGBA's own writes (DMA, BIOS decompression, the interpreter, our slow paths) go through these.
+static struct ARMMemory s_mem;  // mGBA's original handlers
+static struct ARMInterruptHandler s_irqh;
+
+static void w_store32(struct ARMCore* cpu, uint32_t a, int32_t v, int* cc) {
+	ram_write(a, 0xFFFFFC, 4);
+	s_mem.store32(cpu, a, v, cc);
+}
+static void w_store16(struct ARMCore* cpu, uint32_t a, int16_t v, int* cc) {
+	ram_write(a, 0xFFFFFE, 2);
+	s_mem.store16(cpu, a, v, cc);
+}
+static void w_store8(struct ARMCore* cpu, uint32_t a, int8_t v, int* cc) {
+	ram_write(a, 0xFFFFFF, 1);
+	s_mem.store8(cpu, a, v, cc);
+}
+static uint32_t w_storeMultiple(struct ARMCore* cpu, uint32_t base, int mask, enum LSMDirection dir, int* cc) {
+	unsigned r = base >> 24;
+	if (rc_codeBits[r & 15] && (r == 0x2 || r == 0x3)) {
+		// At most 16 words on either side of the base address.
+		uint32_t size = region_size(r, s_gba);
+		for (int32_t d = -64; d < 68; d += 4) {
+			uint32_t off = (uint32_t) (((int32_t) (base & 0xFFFFFC) + d)) & (size - 1);
+			rc_code_write(r, off, 4);
+		}
+	}
+	return s_mem.storeMultiple(cpu, base, mask, dir, cc);
+}
+static void w_swi16(struct ARMCore* cpu, int imm) {
+	s_irqh.swi16(cpu, imm);
+	if ((imm & 0xFF) <= 1) {  // SoftReset / RegisterRamReset clear RAM without going through stores
+		++rc_codeGen;
+	}
+}
+static void w_swi32(struct ARMCore* cpu, int imm) {
+	s_irqh.swi32(cpu, imm);
+	if (((imm >> 16) & 0xFF) <= 1) {
+		++rc_codeGen;
+	}
+}
+
+void recomp_invalidate(void) {
+	++rc_codeGen;
 }
 
 // Several overlays can be loaded at the same RAM address over time; every version the recompiler saw
@@ -287,6 +376,16 @@ bool recomp_attach(struct mCore* core) {
 	s_core = core;
 	core->runFrame = run_frame;
 	struct ARMCore* cpu = core->cpu;
+	if (cpu->memory.store32 != w_store32) {
+		s_mem = cpu->memory;
+		cpu->memory.store32 = w_store32;
+		cpu->memory.store16 = w_store16;
+		cpu->memory.store8 = w_store8;
+		cpu->memory.storeMultiple = w_storeMultiple;
+		s_irqh = cpu->irqh;
+		cpu->irqh.swi16 = w_swi16;
+		cpu->irqh.swi32 = w_swi32;
+	}
 	if (cpu->irqh.processEvents != timed_process_events) {
 		s_processEvents = cpu->irqh.processEvents;
 		cpu->irqh.processEvents = timed_process_events;
@@ -294,6 +393,7 @@ bool recomp_attach(struct mCore* core) {
 	core->runLoop = run_loop_core;
 	memset(&s_stats, 0, sizeof(s_stats));
 	memset(s_missKey, 0, sizeof(s_missKey));
+	s_noGuardCache = getenv("RC_NOCACHE") != NULL;
 	s_attached = s_enabled = true;
 	return true;
 }

@@ -60,3 +60,174 @@ struct RecompChunk {
 		    cpu->cycles < cpu->nextEvent) goto LABEL; \
 		return 1; \
 	}
+
+// ------------------------------------------------------------------ fast memory (phase 2b)
+// IWRAM and EWRAM accesses are inlined with exactly the value, rotation and wait states of mGBA's
+// GBALoad*/GBAStore*; every other region still goes through mGBA. Writes that land on bytes holding
+// recompiled RAM code bump rc_codeGen, so the code guards only re-check memory after such a write.
+#include <mgba/internal/gba/gba.h>
+#include <mgba/internal/gba/memory.h>
+
+extern uint8_t* rc_codeBits[16];  // per region: one bit per byte of RAM that holds recompiled code
+extern uint32_t rc_codeGen;
+
+static RC_INLINE void rc_code_write(uint32_t region, uint32_t off, uint32_t size) {
+	const uint8_t* bits = rc_codeBits[region & 15];
+	if (bits && RC_UNLIKELY(bits[off >> 3] & (((1u << size) - 1) << (off & 7)))) {
+		++rc_codeGen;
+	}
+}
+
+#define RC_MEM(cpu) (&((struct GBA*) (cpu)->master)->memory)
+
+static RC_INLINE int rc_stall(struct ARMCore* cpu, const struct GBAMemory* m, int wait) {
+	if (m->activeRegion < REGION_CART0 || !m->prefetch) {
+		return wait;
+	}
+	return cpu->memory.stall(cpu, wait);
+}
+
+static RC_INLINE uint32_t rc_load32(struct ARMCore* cpu, uint32_t a, int* cc) {
+	uint32_t r = a >> BASE_OFFSET;
+	if (r == REGION_WORKING_IRAM || r == REGION_WORKING_RAM) {
+		struct GBAMemory* m = RC_MEM(cpu);
+		uint32_t v;
+		int wait;
+		if (r == REGION_WORKING_IRAM) {
+			LOAD_32(v, a & (SIZE_WORKING_IRAM - 4), m->iwram);
+			wait = 0;
+		} else {
+			LOAD_32(v, a & (SIZE_WORKING_RAM - 4), m->wram);
+			wait = m->waitstatesNonseq32[REGION_WORKING_RAM];
+		}
+		if (cc) {
+			*cc += rc_stall(cpu, m, wait + 2);
+		}
+		int rotate = (a & 3) << 3;  // ROR does not parenthesize its argument
+		return ROR(v, rotate);
+	}
+	return cpu->memory.load32(cpu, a, cc);
+}
+
+static RC_INLINE uint32_t rc_load16(struct ARMCore* cpu, uint32_t a, int* cc) {
+	uint32_t r = a >> BASE_OFFSET;
+	if (r == REGION_WORKING_IRAM || r == REGION_WORKING_RAM) {
+		struct GBAMemory* m = RC_MEM(cpu);
+		uint32_t v;
+		int wait;
+		if (r == REGION_WORKING_IRAM) {
+			LOAD_16(v, a & (SIZE_WORKING_IRAM - 2), m->iwram);
+			wait = 0;
+		} else {
+			LOAD_16(v, a & (SIZE_WORKING_RAM - 2), m->wram);
+			wait = m->waitstatesNonseq16[REGION_WORKING_RAM];
+		}
+		if (cc) {
+			*cc += rc_stall(cpu, m, wait + 2);
+		}
+		int rotate = (a & 1) << 3;
+		return ROR(v, rotate);
+	}
+	return cpu->memory.load16(cpu, a, cc);
+}
+
+static RC_INLINE uint32_t rc_load8(struct ARMCore* cpu, uint32_t a, int* cc) {
+	uint32_t r = a >> BASE_OFFSET;
+	if (r == REGION_WORKING_IRAM || r == REGION_WORKING_RAM) {
+		struct GBAMemory* m = RC_MEM(cpu);
+		uint32_t v;
+		int wait;
+		if (r == REGION_WORKING_IRAM) {
+			v = ((uint8_t*) m->iwram)[a & (SIZE_WORKING_IRAM - 1)];
+			wait = 0;
+		} else {
+			v = ((uint8_t*) m->wram)[a & (SIZE_WORKING_RAM - 1)];
+			wait = m->waitstatesNonseq16[REGION_WORKING_RAM];
+		}
+		if (cc) {
+			*cc += rc_stall(cpu, m, wait + 2);
+		}
+		return v;
+	}
+	return cpu->memory.load8(cpu, a, cc);
+}
+
+static RC_INLINE void rc_store32(struct ARMCore* cpu, uint32_t a, int32_t value, int* cc) {
+	uint32_t r = a >> BASE_OFFSET;
+	if (r == REGION_WORKING_IRAM || r == REGION_WORKING_RAM) {
+		struct GBAMemory* m = RC_MEM(cpu);
+		int wait;
+		if (r == REGION_WORKING_IRAM) {
+			uint32_t off = a & (SIZE_WORKING_IRAM - 4);
+			STORE_32(value, off, m->iwram);
+			rc_code_write(r, off, 4);
+			wait = 0;
+		} else {
+			uint32_t off = a & (SIZE_WORKING_RAM - 4);
+			STORE_32(value, off, m->wram);
+			rc_code_write(r, off, 4);
+			wait = m->waitstatesNonseq32[REGION_WORKING_RAM];
+		}
+		if (cc) {
+			*cc += rc_stall(cpu, m, wait + 1);
+		}
+		return;
+	}
+	cpu->memory.store32(cpu, a, value, cc);
+}
+
+static RC_INLINE void rc_store16(struct ARMCore* cpu, uint32_t a, int16_t value, int* cc) {
+	uint32_t r = a >> BASE_OFFSET;
+	if (r == REGION_WORKING_IRAM || r == REGION_WORKING_RAM) {
+		struct GBAMemory* m = RC_MEM(cpu);
+		int wait;
+		if (r == REGION_WORKING_IRAM) {
+			uint32_t off = a & (SIZE_WORKING_IRAM - 2);
+			STORE_16(value, off, m->iwram);
+			rc_code_write(r, off, 2);
+			wait = 0;
+		} else {
+			uint32_t off = a & (SIZE_WORKING_RAM - 2);
+			STORE_16(value, off, m->wram);
+			rc_code_write(r, off, 2);
+			wait = m->waitstatesNonseq16[REGION_WORKING_RAM];
+		}
+		if (cc) {
+			*cc += rc_stall(cpu, m, wait + 1);
+		}
+		return;
+	}
+	cpu->memory.store16(cpu, a, value, cc);
+}
+
+static RC_INLINE void rc_store8(struct ARMCore* cpu, uint32_t a, int8_t value, int* cc) {
+	uint32_t r = a >> BASE_OFFSET;
+	if (r == REGION_WORKING_IRAM || r == REGION_WORKING_RAM) {
+		struct GBAMemory* m = RC_MEM(cpu);
+		int wait;
+		if (r == REGION_WORKING_IRAM) {
+			uint32_t off = a & (SIZE_WORKING_IRAM - 1);
+			((int8_t*) m->iwram)[off] = value;
+			rc_code_write(r, off, 1);
+			wait = 0;
+		} else {
+			uint32_t off = a & (SIZE_WORKING_RAM - 1);
+			((int8_t*) m->wram)[off] = value;
+			rc_code_write(r, off, 1);
+			wait = m->waitstatesNonseq16[REGION_WORKING_RAM];
+		}
+		if (cc) {
+			*cc += rc_stall(cpu, m, wait + 1);
+		}
+		return;
+	}
+	cpu->memory.store8(cpu, a, value, cc);
+}
+
+// Simple ALU instructions skip RC_PRE (they never look at PC or prefetch); the interpreter-visible
+// state is written only when control leaves the chunk after one of them.
+#define RC_EVENT_AT(PC, P0, P1) \
+	if (RC_UNLIKELY(cpu->cycles >= cpu->nextEvent)) { \
+		RC_PRE(PC, P0, P1) \
+		return 1; \
+	}

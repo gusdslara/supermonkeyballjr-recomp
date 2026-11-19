@@ -158,6 +158,7 @@ void emu_shutdown(void) {
 void emu_reset(void) {
 	if (s_core) {
 		s_core->reset(s_core);
+		recomp_invalidate();
 	}
 }
 
@@ -230,6 +231,7 @@ bool emu_load_state(const char* path) {
 		return false;
 	}
 	bool ok = size == s_core->stateSize(s_core) && s_core->loadState(s_core, buf);
+	recomp_invalidate();
 	SDL_free(buf);
 	return ok;
 }

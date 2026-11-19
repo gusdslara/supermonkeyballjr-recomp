@@ -98,6 +98,41 @@ def arm_name(op):
     return ARM[((op >> 16) & 0xFF0) | ((op >> 4) & 0xF)]
 
 
+THUMB_SIMPLE = {"LSL1", "LSR1", "ASR1", "ADD3", "SUB3", "ADD1", "SUB1", "MOV1", "CMP1", "ADD2", "SUB2",
+                "AND", "EOR", "LSL2", "LSR2", "ASR2", "ADC", "SBC", "ROR", "TST", "NEG", "CMP2", "CMN",
+                "ORR", "MUL", "BIC", "MVN", "ADD6", "ADD7", "SUB4"}
+ARM_MUL = {"MUL", "MULS", "MLA", "MLAS", "UMULL", "UMULLS", "UMLAL", "UMLALS",
+           "SMULL", "SMULLS", "SMLAL", "SMLALS"}
+
+
+def thumb_simple(name, op):
+    """Register/flag-only instruction: never reads PC or prefetch, never touches memory or PC."""
+    if os.environ.get("RECOMP_NO_SIMPLE"):
+        return False
+    if name in THUMB_SIMPLE:
+        return True
+    if name[:4] in ("ADD4", "CMP3", "MOV3") and len(name) == 6:
+        rd = (op & 7) | (8 if name[4] == "1" else 0)
+        rm = ((op >> 3) & 7) | (8 if name[5] == "1" else 0)
+        return rd != 15 and rm != 15
+    return False
+
+
+def arm_simple(name, op):
+    if os.environ.get("RECOMP_NO_SIMPLE"):
+        return False
+    if name in ARM_MUL:
+        return all((op >> s) & 15 != 15 for s in (0, 8, 12, 16))
+    if not name.startswith(ARM_ALU + ("TST", "TEQ", "CMP", "CMN")):
+        return False
+    regs = [(op >> 16) & 15, (op >> 12) & 15]
+    if not (op & 0x02000000):  # register operand (and register shift amount)
+        regs.append(op & 15)
+        if op & 0x10:
+            regs.append((op >> 8) & 15)
+    return 15 not in regs
+
+
 def arm_flow(sp, addr):
     op = sp.u32(addr)
     cond = op >> 28
@@ -231,6 +266,10 @@ def make_ops(mgba, which):
         text = re.sub(r"static void _ARMInstruction ## NAME \(struct ARMCore\* cpu, uint32_t opcode\)",
                       "static RC_INLINE void A_ ## NAME (struct ARMCore* cpu, const uint32_t opcode)", text)
         text = text[: text.index("const ARMInstruction _armTable")]
+    # IWRAM/EWRAM accesses take the inline fast path from rc_prelude.h.
+    if not os.environ.get("RECOMP_NO_FASTMEM"):
+        for kind in ("load32", "load16", "load8", "store32", "store16", "store8"):
+            text = text.replace("cpu->memory.%s(" % kind, "rc_%s(" % kind)
     if " T_ ## NAME" not in text and " A_ ## NAME" not in text:
         raise SystemExit("recomp: could not transform %s (mGBA version changed?)" % src)
     return OPS_HEADER.format(src="src/arm/isa-%s.c" % which) + text
@@ -248,10 +287,19 @@ def emit_chunk(sp, mode, addrs, fname):
         pc = a + 2 * width
         def pf(x):
             return ("0x%X" % (sp.u16(x) if mode == "T" else sp.u32(x))) if sp.has(x, width) else "0"
-        out.append("L_%08X: RC_PRE(0x%08Xu, %s, %s);" % (a, pc, pf(a + width), pf(a + 2 * width)))
+        pre = "0x%08Xu, %s, %s" % (pc, pf(a + width), pf(a + 2 * width))
         if mode == "T":
             op = sp.u16(a)
             name = THUMB[op >> 6]
+            simple = thumb_simple(name, op)
+        else:
+            op = sp.u32(a)
+            name = arm_name(op)
+            simple = arm_simple(name, op)
+        # Simple ALU instructions never look at PC/prefetch: that state is only written when control
+        # can leave the chunk (RC_EVENT_AT) or before an instruction that needs it.
+        out.append(("L_%08X:" % a) if simple else ("L_%08X: RC_PRE(%s);" % (a, pre)))
+        if mode == "T":
             out.append("\tT_%s(cpu, 0x%04Xu);" % (name, op))
             if thumb_writes_pc(name, op):
                 _, jumps, _, _ = thumb_flow(sp, a)
@@ -262,8 +310,6 @@ def emit_chunk(sp, mode, addrs, fname):
                 else:
                     out.append("\tRC_EXIT_IF_PC(0x%08Xu);" % pc)
         else:
-            op = sp.u32(a)
-            name = arm_name(op)
             cond = op >> 28
             if cond == 0xE:
                 out.append("\tA_%s(cpu, 0x%08Xu);" % (name, op))
@@ -272,15 +318,17 @@ def emit_chunk(sp, mode, addrs, fname):
             else:
                 out.append("\tif (ARMTestCondition(cpu, %d)) A_%s(cpu, 0x%08Xu); else cpu->cycles += ARM_PREFETCH_CYCLES;"
                            % (cond, name, op))
-            _, jumps, _, _ = arm_flow(sp, a)
-            local = [t for t in jumps if t in aset]
-            if local:
-                t = local[0]
-                out.append("\tRC_BRANCH_ARM(0x%08Xu, 0x%08Xu, L_%08X);" % (pc, t + 4, t))
-            else:
-                out.append("\tRC_EXIT_IF_PC_ARM(0x%08Xu);" % pc)
-        out.append("\tRC_EVENT();")
-    out.append("\treturn 1;\n}\n")
+            if not simple:
+                _, jumps, _, _ = arm_flow(sp, a)
+                local = [t for t in jumps if t in aset]
+                if local:
+                    t = local[0]
+                    out.append("\tRC_BRANCH_ARM(0x%08Xu, 0x%08Xu, L_%08X);" % (pc, t + 4, t))
+                else:
+                    out.append("\tRC_EXIT_IF_PC_ARM(0x%08Xu);" % pc)
+        out.append(("\tRC_EVENT_AT(%s);" % pre) if simple else "\tRC_EVENT();")
+    # Falling off the end of the chunk: leave the interpreter-visible state of the last instruction.
+    out.append("\tRC_PRE(%s);\n\treturn 1;\n}\n" % pre)
     return "\n".join(out)
 
 

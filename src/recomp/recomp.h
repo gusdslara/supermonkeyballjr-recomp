@@ -14,6 +14,9 @@ bool recomp_available(void);
 // has no recompiled code or the loaded ROM is not the one it was generated from.
 bool recomp_attach(struct mCore* core);
 
+// Forget which RAM code was verified (call after reset or loading a savestate).
+void recomp_invalidate(void);
+
 // Native (true) or interpreter (false) execution; attach must have succeeded for native.
 void recomp_set_enabled(bool on);
 bool recomp_enabled(void);
